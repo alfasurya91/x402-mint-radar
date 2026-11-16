@@ -1,0 +1,60 @@
+{
+  "chain": {
+    "chainId": 44005,
+    "explorer": "https://explorer-test.qday.info",
+    "name": "Aevum Testnet",
+    "rpc": "https://rpc-test.qday.info"
+  },
+  "description": "Seller agent on Aevum testnet: a free-mint radar and a bug-bounty radar, each sold per call for $0.01 in stablecoin behind an x402 paywall (EIP-3009 transferWithAuthorization). Phase 2: LIVE on-chain settlement — the server submits transferWithAuthorization and returns the real tx hash.",
+  "image": "",
+  "name": "Mint Radar",
+  "note": "ERC-8004 Validation Registry is intentionally NOT used: it was pulled back for rework, so this build uses Identity + Reputation only.",
+  "phase": 2,
+  "registrations": [
+    {
+      "standard": "ERC-8004",
+      "agentId": 0,
+      "identityRegistry": "0x4f3cB7907bEb073C51dB3Bc18131ABEd5fCD1f31",
+      "reputationRegistry": "0xF4B926532e198e1aB00a40308Ca5EB3F50DFEc67",
+      "token": "0xF5506234c9185d1D4262615504093DA671a61712",
+      "agentURI": "https://raw.githubusercontent.com/alfasurya91/x402-mint-radar/main/registration.json",
+      "explorerIdentity": "https://explorer-test.qday.info/address/0x4f3cB7907bEb073C51dB3Bc18131ABEd5fCD1f31",
+      "explorerReputation": "https://explorer-test.qday.info/address/0xF4B926532e198e1aB00a40308Ca5EB3F50DFEc67",
+      "explorerToken": "https://explorer-test.qday.info/address/0xF5506234c9185d1D4262615504093DA671a61712",
+      "registerTx": "0x7c21470d51718548359852358c961b1a19c8a8d27c44934855587b8d45640524",
+      "note": "Phase 2: reference ERC-8004 Identity + Reputation registries deployed on Aevum testnet (chain 44005); seller agent registered as agentId 0."
+    }
+  ],
+  "services": [
+    {
+      "description": "Today's verified free mints for Agent ID wallets (contract, free quota left, price).",
+      "endpoint": "http://127.0.0.1:8787/radar",
+      "name": "radar",
+      "payment": {
+        "amount": "10000",
+        "asset": "0xF5506234c9185d1D4262615504093DA671a61712",
+        "network": "eip155:44005",
+        "priceDisplay": "$0.01",
+        "scheme": "eip3009"
+      },
+      "version": "1.0.0"
+    },
+    {
+      "description": "Ranked list of open bug-bounty programs.",
+      "endpoint": "http://127.0.0.1:8787/bounty",
+      "name": "bounty",
+      "payment": {
+        "amount": "10000",
+        "asset": "0xF5506234c9185d1D4262615504093DA671a61712",
+        "network": "eip155:44005",
+        "priceDisplay": "$0.01",
+        "scheme": "eip3009"
+      },
+      "version": "1.0.0"
+    }
+  ],
+  "supportedTrust": [
+    "reputation"
+  ],
+  "written": "2026-11-16"
+}

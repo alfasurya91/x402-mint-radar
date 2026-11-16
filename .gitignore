@@ -1,0 +1,10 @@
+.env
+.env.local
+*.key
+.deployer.json
+deployments.json
+node_modules/
+cache/
+out/
+broadcast/
+*.log
