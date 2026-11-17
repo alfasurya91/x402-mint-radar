@@ -18,7 +18,7 @@ const priv = crypto.randomBytes(32);
 const d = BigInt("0x" + priv.toString("hex"));
 const address = publicKeyToAddress(_test.pointMul(d, _test.G));
 
-function buildPayment(overrides = {}) {
+function buildPayment(overrides = {}, token = CONFIG.token, includeAsset = true) {
   const now = Math.floor(Date.now() / 1000);
   const auth = {
     from: address,
@@ -30,19 +30,21 @@ function buildPayment(overrides = {}) {
     ...overrides,
   };
   const domain = {
-    name: CONFIG.token.name,
-    version: CONFIG.token.version,
+    name: token.name,
+    version: token.version,
     chainId: CONFIG.chainId,
-    verifyingContract: CONFIG.token.address,
+    verifyingContract: token.address,
   };
   const digest = transferWithAuthorizationDigest(domain, auth);
   const sig = signDigest(digest, priv);
-  return {
+  const payment = {
     x402Version: 1,
     scheme: "eip3009",
     network: CONFIG.network,
     payload: { ...auth, signature: "0x" + sig.toString("hex") },
   };
+  if (includeAsset) payment.asset = token.address;
+  return payment;
 }
 
 function header(payment) {
@@ -102,6 +104,10 @@ try {
     radar402.body.accepts[0].network === CONFIG.network &&
     radar402.body.accepts[0].amount === String(CONFIG.price) &&
     radar402.body.accepts[0].payTo === CONFIG.seller);
+  check("402 offers BOTH tokens (aUSD + tUSD8)",
+    Array.isArray(radar402.body.accepts) && radar402.body.accepts.length === 2 &&
+    radar402.body.accepts.some((o) => o.asset.toLowerCase() === CONFIG.tokens.tusd8.address.toLowerCase()) &&
+    radar402.body.accepts.some((o) => o.asset.toLowerCase() === CONFIG.token.address.toLowerCase()));
 
   const bounty402 = await get("/bounty");
   check("GET /bounty without payment -> 402", bounty402.status === 402);
@@ -139,6 +145,25 @@ try {
   const bountyPaid = await get("/bounty", { "x-payment": header(buildPayment()) });
   check("valid payment /bounty -> 200 + 3 programs",
     bountyPaid.status === 200 && Array.isArray(bountyPaid.body.programs) && bountyPaid.body.programs.length === 3);
+
+  // Phase 3 — dual-token (mock settlement: signature verification only).
+  const tusd8Paid = await get("/radar", {
+    "x-payment": header(buildPayment({}, CONFIG.tokens.tusd8)),
+  });
+  check("tUSD8 payment /radar -> 200 (mock)", tusd8Paid.status === 200);
+  const tusd8RespHeader = tusd8Paid.headers.get("x-payment-response");
+  const tusd8Resp = tusd8RespHeader ? JSON.parse(Buffer.from(tusd8RespHeader, "base64url").toString("utf8")) : null;
+  check("tUSD8 response names tUSD8 asset",
+    tusd8Resp && tusd8Resp.assetSymbol === "tUSD8" &&
+    tusd8Resp.asset.toLowerCase() === CONFIG.tokens.tusd8.address.toLowerCase());
+
+  const unknownAssetPay = buildPayment({}, CONFIG.tokens.tusd8);
+  unknownAssetPay.asset = "0x0000000000000000000000000000000000000001";
+  const unknownAsset = await get("/radar", { "x-payment": header(unknownAssetPay) });
+  check("unknown asset -> 402", unknownAsset.status === 402);
+
+  const legacyNoAsset = await get("/bounty", { "x-payment": header(buildPayment({}, CONFIG.token, false)) });
+  check("aUSD payment without asset field -> 200 (backward compat)", legacyNoAsset.status === 200);
 
   const reg = await get("/registration.json");
   check("/registration.json 200 + name", reg.status === 200 && reg.body.name === "Mint Radar");

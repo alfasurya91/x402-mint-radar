@@ -21,7 +21,7 @@ import { transferWithAuthorizationDigest } from "./eip712.mjs";
 import { ecrecover, publicKeyToAddress, setCryptoRandom, _test } from "./secp256k1.mjs";
 setCryptoRandom(crypto);
 import {
-  getTokenNonce, sendTransaction, waitReceipt,
+  getTokenNonce, getAuthorizationState, sendTransaction, waitReceipt,
   encodeTransferWithAuthorization,
 } from "./chain.mjs";
 
@@ -261,27 +261,29 @@ function paywall402(res, reason = null) {
     x402Version: 1,
     error: "Payment required — sign an EIP-3009 transferWithAuthorization and retry with X-PAYMENT." +
       (reason ? " (" + reason + ")" : ""),
-    accepts: [
-      {
-        scheme: "eip3009",
-        network: CONFIG.network,
-        amount: String(CONFIG.price),
-        asset: CONFIG.token.address,
-        payTo: SELLER,
-        maxTimeoutSeconds: CONFIG.authTtlSeconds,
-        extra: {
-          name: CONFIG.token.name,
-          version: CONFIG.token.version,
-          decimals: CONFIG.token.decimals,
-          symbol: CONFIG.token.symbol,
-          priceDisplay: CONFIG.priceDisplay,
-          settlement: SETTLEMENT,
-          note: LIVE
-            ? "Live settlement: the server submits transferWithAuthorization on Aevum testnet and returns the real tx hash."
-            : "Mock settlement: signature is verified for real, settlement is a mock ledger (no on-chain transfer). Set AEVUM_LIVE=1 with .deployer.json for live settlement.",
-        },
+    // Dual-token (phase 3): the buyer picks either accepted stablecoin.
+    // Both are 6-decimal, $0.01 per call, same EIP-3009 scheme — only the
+    // token address, EIP-712 domain (name/version) and nonce semantics differ.
+    accepts: Object.values(CONFIG.tokens).map((t) => ({
+      scheme: "eip3009",
+      network: CONFIG.network,
+      amount: String(CONFIG.price),
+      asset: t.address,
+      payTo: SELLER,
+      maxTimeoutSeconds: CONFIG.authTtlSeconds,
+      extra: {
+        name: t.name,
+        version: t.version,
+        decimals: t.decimals,
+        symbol: t.symbol,
+        priceDisplay: CONFIG.priceDisplay,
+        settlement: SETTLEMENT,
+        nonceMode: t.nonceMode,
+        note: LIVE
+          ? "Live settlement: the server submits transferWithAuthorization on Aevum testnet and returns the real tx hash."
+          : "Mock settlement: signature is verified for real, settlement is a mock ledger (no on-chain transfer). Set AEVUM_LIVE=1 with .deployer.json for live settlement.",
       },
-    ],
+    })),
   });
 }
 
@@ -297,6 +299,11 @@ function verifyPayment(header) {
   if (decoded.x402Version !== 1) return { ok: false, reason: "unsupported x402Version" };
   if (decoded.scheme !== "eip3009") return { ok: false, reason: "unsupported scheme" };
   if (decoded.network !== CONFIG.network) return { ok: false, reason: "wrong network" };
+  // Dual-token (phase 3): the buyer names the asset in X-PAYMENT
+  // (top-level `asset`: token address or symbol). Absent -> aUSD, the
+  // phase-2 default, so existing buyers keep working unchanged.
+  const token = CONFIG.tokenFor(decoded.asset);
+  if (!token) return { ok: false, reason: "unsupported asset " + String(decoded.asset) };
   const p = decoded.payload || {};
   const need = ["from", "to", "value", "validAfter", "validBefore", "nonce", "signature"];
   for (const k of need) if (p[k] === undefined) return { ok: false, reason: "payload missing " + k };
@@ -309,15 +316,15 @@ function verifyPayment(header) {
   const now = Math.floor(Date.now() / 1000);
   if (Number(p.validAfter) > now) return { ok: false, reason: "authorization not yet valid" };
   if (Number(p.validBefore) <= now) return { ok: false, reason: "authorization expired" };
-  const nonceKey = String(p.from).toLowerCase() + ":" + String(p.nonce).toLowerCase();
+  const nonceKey = token.address.toLowerCase() + ":" + String(p.from).toLowerCase() + ":" + String(p.nonce).toLowerCase();
   if (usedNonces.has(nonceKey)) return { ok: false, reason: "nonce already used (replay)" };
   const sig = Buffer.from(String(p.signature).replace(/^0x/, ""), "hex");
   if (sig.length !== 65) return { ok: false, reason: "signature must be 65 bytes" };
   const domain = {
-    name: CONFIG.token.name,
-    version: CONFIG.token.version,
+    name: token.name,
+    version: token.version,
     chainId: CONFIG.chainId,
-    verifyingContract: CONFIG.token.address,
+    verifyingContract: token.address,
   };
   let digest;
   try {
@@ -341,15 +348,23 @@ function verifyPayment(header) {
     }
     return { ok: false, reason: "signature does not match from address" };
   }
-  return { ok: true, payload: p, nonceKey, signature: sig };
+  return { ok: true, payload: p, nonceKey, signature: sig, token };
 }
 
-async function settleLive(payload, signature) {
-  // Pre-flight: the on-chain sequential nonce must equal the auth nonce,
-  // otherwise the call would revert and waste gas.
-  const onChainNonce = await getTokenNonce(CONFIG.token.address, payload.from);
-  if (onChainNonce !== BigInt(payload.nonce)) {
-    throw new Error("on-chain nonce mismatch (already used or stale)");
+async function settleLive(payload, signature, token) {
+  // Pre-flight, per token nonce model — otherwise the call would revert
+  // and waste gas:
+  //  - aUSD (sequential): the on-chain sequential nonce must equal the
+  //    auth nonce.
+  //  - tUSD8 (authorizationState): the auth nonce must not be spent yet.
+  if (token.nonceMode === "authorizationState") {
+    const spent = await getAuthorizationState(token.address, payload.from, payload.nonce);
+    if (spent) throw new Error("authorization already used (tUSD8 nonce spent)");
+  } else {
+    const onChainNonce = await getTokenNonce(token.address, payload.from);
+    if (onChainNonce !== BigInt(payload.nonce)) {
+      throw new Error("on-chain nonce mismatch (already used or stale)");
+    }
   }
   const v = signature[64];
   const r = "0x" + signature.subarray(0, 32).toString("hex");
@@ -363,7 +378,7 @@ async function settleLive(payload, signature) {
     v, r, s
   );
   const { txHash } = await sendTransaction({
-    from: SELLER, to: CONFIG.token.address, data, value: 0n, privateKey: SELLER_KEY,
+    from: SELLER, to: token.address, data, value: 0n, privateKey: SELLER_KEY,
   });
   const receipt = await waitReceipt(txHash);
   if (receipt.status !== "0x1") throw new Error("on-chain settlement reverted: " + txHash);
@@ -376,11 +391,11 @@ async function paidEndpoint(req, res, dataFn) {
     paywall402(res, check.reason);
     return;
   }
-  const { payload, nonceKey, signature } = check;
+  const { payload, nonceKey, signature, token } = check;
   let txHash = null;
   if (LIVE) {
     try {
-      txHash = await settleLive(payload, signature);
+      txHash = await settleLive(payload, signature, token);
     } catch (e) {
       // Do NOT mark the nonce used: a failed settlement (e.g. buyer
       // underfunded) leaves the authorization unspent on-chain.
@@ -393,6 +408,8 @@ async function paidEndpoint(req, res, dataFn) {
     from: payload.from,
     to: payload.to,
     value: payload.value,
+    asset: token.address,
+    assetSymbol: token.symbol,
     nonce: payload.nonce,
     endpoint: req.url,
     txHash,
@@ -403,12 +420,14 @@ async function paidEndpoint(req, res, dataFn) {
     success: true,
     payer: payload.from,
     amount: String(payload.value),
+    asset: token.address,
+    assetSymbol: token.symbol,
     network: CONFIG.network,
     settlement: SETTLEMENT,
     txHash,
     explorerTxUrl: txHash ? CONFIG.explorer + "/tx/" + txHash : null,
     note: LIVE
-      ? "Settled on-chain via transferWithAuthorization on Aevum testnet."
+      ? `Settled on-chain via transferWithAuthorization (${token.symbol}) on Aevum testnet.`
       : "Mock settlement — no on-chain transfer. Set AEVUM_LIVE=1 for live settlement.",
   };
   sendJson(res, 200, data, { "x-payment-response": b64urlEncode(response) });
@@ -424,6 +443,7 @@ const server = http.createServer((req, res) => {
         phase: 2,
         chain: CONFIG.network,
         token: CONFIG.token,
+        acceptedTokens: Object.values(CONFIG.tokens),
         price: CONFIG.price,
         priceDisplay: CONFIG.priceDisplay,
         seller: SELLER,
@@ -461,7 +481,7 @@ const server = http.createServer((req, res) => {
       res.end(
         "<h1>Aevum x402 seller agent (phase 2)</h1>" +
           "<p>Two paid endpoints behind one x402 paywall: <a href=\"/radar\">/radar</a> (free-mint radar) and <a href=\"/bounty\">/bounty</a> (bug-bounty radar). Price " +
-          CONFIG.priceDisplay + " in " + CONFIG.token.symbol + " on Aevum testnet (chain " + CONFIG.chainId + "). Settlement: " + SETTLEMENT + ".</p>" +
+          CONFIG.priceDisplay + " in " + Object.values(CONFIG.tokens).map((t) => t.symbol).join(" or ") + " on Aevum testnet (chain " + CONFIG.chainId + "). Settlement: " + SETTLEMENT + ".</p>" +
           "<p>First request returns HTTP 402. Sign the EIP-3009 authorization and retry with X-PAYMENT. See <a href=\"/registration.json\">/registration.json</a> (ERC-8004 registration file) and /health.</p>"
       );
       return;

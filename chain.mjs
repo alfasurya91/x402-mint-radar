@@ -108,6 +108,21 @@ export async function getTokenBalance(token, owner) {
   return BigInt(await ethCall(token, data));
 }
 
+// --- EIP-3009 (FiatTokenV2 / USDC-style) authorization state ---
+// tUSD8 nonces are arbitrary bytes32, each usable once; the contract
+// tracks them in authorizationState(authorizer, nonce) -> bool.
+// Selector 0xe94a0102 = authorizationState(address,bytes32).
+const AUTHORIZATION_STATE_SEL = "0xe94a0102";
+
+export async function getAuthorizationState(token, owner, nonce) {
+  const data =
+    AUTHORIZATION_STATE_SEL +
+    owner.replace(/^0x/, "").padStart(64, "0") +
+    String(nonce).replace(/^0x/, "").padStart(64, "0");
+  const out = await ethCall(token, data);
+  return out !== "0x" && BigInt(out) !== 0n;
+}
+
 // --- ABI encoding for transferWithAuthorization ---
 
 const TRANSFER_WITH_AUTH_SEL = "e3ee160e"; // no 0x — encodeTransferWithAuthorization returns raw hex; callers prepend "0x"

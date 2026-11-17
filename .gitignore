@@ -2,6 +2,7 @@
 .env.local
 *.key
 .deployer.json
+.buyer-tusd8.json
 deployments.json
 node_modules/
 cache/
